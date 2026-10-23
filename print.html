@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>ARぬりえ さかな — 印刷用</title>
+<style>
+  @page { size: A4; margin: 0; }
+  html, body { margin: 0; padding: 0; background: #eef1f5; }
+  body { font-family: 'UD Digi Kyokasho N','UD Digi Kyokasho NK','Hiragino Sans','Noto Sans JP',sans-serif; }
+  #paper { width: 210mm; height: 297mm; background: #fff; margin: 6mm auto; box-shadow: 0 2mm 8mm rgba(0,0,0,.18); display: block; }
+  #bar { text-align: center; padding: 4mm 0 0; font-size: 3.4mm; color: #33475e; }
+  #bar button { font: inherit; font-size: 3.6mm; padding: 2mm 6mm; border-radius: 2mm; border: 0.4mm solid #33475e; background: #fff; cursor: pointer; }
+  #bar span { margin-left: 4mm; color: #64748b; }
+  @media print {
+    body { background: #fff; }
+    #bar { display: none; }
+    #paper { margin: 0; box-shadow: none; }
+  }
+</style>
+</head>
+<body>
+<div id="bar">A4・ふつうの紙で印刷してください（できれば少し厚めの紙）<button onclick="window.print()">印刷する</button><span>※用紙は「実際のサイズ / 100%」で</span></div>
+<svg id="paper" xmlns="http://www.w3.org/2000/svg" width="210mm" height="297mm" viewBox="0 0 210 297"></svg>
+<script src="art.js"></script>
+<script src="qrcodegen.js"></script>
+<script>
+(function () {
+  const S = Art.SHEET;
+  const INK = '#1b2a41';
+  const svg = document.getElementById('paper');
+  const NS = 'http://www.w3.org/2000/svg';
+  function el(tag, attrs, parent) {
+    const e = document.createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    (parent || svg).appendChild(e);
+    return e;
+  }
+  function text(x, y, str, size, opt) {
+    opt = opt || {};
+    const t = el('text', Object.assign({
+      x: x, y: y, 'font-size': size, fill: opt.fill || INK,
+      'text-anchor': opt.anchor || 'start', 'font-weight': opt.weight || 'normal',
+      'letter-spacing': opt.ls || 0
+    }, opt.attrs || {}));
+    t.textContent = str;
+    return t;
+  }
+
+  /* ---------- わく ---------- */
+  el('rect', { x: 6, y: 6, width: 198, height: 285, rx: 5, fill: '#ffffff', stroke: INK, 'stroke-width': 0.7 });
+
+  /* ---------- タイトル ---------- */
+  text(18, 21, 'ぬって、うごかす！', 9.2, { weight: 'bold' });
+  text(18, 29.4, 'AR ぬりえ  ─  さかな', 4.6, { fill: '#41566e' });
+  text(192, 21, '① ぬる  ② よみこむ  ③ およぐ', 3.6, { anchor: 'end', fill: '#64748b' });
+
+  /* ---------- 海の飾り（うすい線） ---------- */
+  const deco = el('g', { stroke: INK, fill: 'none', 'stroke-width': 0.55, opacity: 0.95 });
+  // 波（上のほう）
+  for (let row = 0; row < 2; row++) {
+    const y = 40 + row * 3.2;
+    let d = 'M12 ' + y;
+    for (let x = 12; x < 198; x += 8) d += ' q4 ' + (row ? -1.8 : -2.4) + ' 8 0';
+    el('path', { d: d }, deco);
+  }
+  // 砂と小石（下）
+  let sand = 'M12 238';
+  for (let x = 12; x <= 138; x += 6) sand += ' q3 ' + (Math.sin(x * 0.4) * 1.6).toFixed(2) + ' 6 0';
+  el('path', { d: sand }, deco);
+  [[24, 224, 5, 2.6], [40, 228, 3.4, 2], [186, 226, 4.6, 2.4], [172, 231, 3, 1.8]].forEach(function (p) {
+    el('ellipse', { cx: p[0], cy: p[1], rx: p[2], ry: p[3] }, deco);
+  });
+  // 海藻
+  [[26, 232, -6, 26], [33, 232, 4, 20], [186, 232, 5, 24], [179, 232, -4, 18]].forEach(function (p) {
+    let d = 'M' + p[0] + ' ' + p[1];
+    for (let i = 1; i <= 5; i++) {
+      const yy = p[1] - (p[3] / 5) * i;
+      const xx = p[0] + Math.sin(i * 1.4 + p[0]) * p[2] / 3;
+      d += ' Q' + (p[0] + Math.sin(i * 1.4 + p[0] + 1) * p[2] / 2) + ' ' + (yy + p[3] / 10) + ' ' + xx + ' ' + yy;
+    }
+    el('path', { d: d }, deco);
+  });
+  // あぶく
+  [[60, 62, 4], [52, 74, 2.6], [70, 52, 2.2], [150, 58, 3.4], [158, 70, 2.2]].forEach(function (b) {
+    el('circle', { cx: b[0], cy: b[1], r: b[2] }, deco);
+  });
+
+  /* ---------- さかな ---------- */
+  const gFish = el('g', { 'stroke-linejoin': 'round', 'stroke-linecap': 'round' });
+  const px = S.print;
+  const sorted = Art.geo.slice().sort(function (a, b) { return a.def.z - b.def.z; });
+  sorted.forEach(function (g) {
+    const pts = Art.partPoints(g, px, { wiggle: false });
+    const d = Art.pathD(pts, g.def.closed !== false);
+    const w = (g.def.id === 'body' || g.def.id === 'tail') ? 0.95 : 0.62;
+    el('path', { d: d, fill: '#ffffff', stroke: INK, 'stroke-width': w, 'data-part': g.def.id, 'data-role': g.def.role }, gFish);
+  });
+  Art.LINES.forEach(function (l) {
+    const pts = Art.partPoints({ def: l, pts: Art.chaikin(l.ctrl, 2, false) }, px, { wiggle: false });
+    el('path', { d: Art.pathD(pts, false), fill: 'none', stroke: INK, 'stroke-width': 0.55 }, gFish);
+  });
+
+  /* ---------- QR ---------- */
+  const q = qrcode(0, 'Q');
+  q.addData(S.qr.text);
+  q.make();
+  const n = q.getModuleCount();
+  const cell = S.qr.size / n;          // 記号そのものが (x,y,size) に収まる
+  const box = { x: S.qr.x - 4.5, y: S.qr.y - 8.5, w: S.qr.size + 9, h: S.qr.size + 12.5 };
+  el('rect', { x: box.x, y: box.y, width: box.w, height: box.h, rx: 2, fill: '#fff', stroke: INK, 'stroke-width': 0.5, 'stroke-dasharray': '1.6 1.2' });
+  const gq = el('g', { fill: '#111' });
+  for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) {
+    if (q.isDark(r, c)) {
+      el('rect', {
+        x: (S.qr.x + c * cell).toFixed(3),
+        y: (S.qr.y + r * cell).toFixed(3),
+        width: cell.toFixed(3), height: cell.toFixed(3)
+      }, gq);
+    }
+  }
+  text(S.qr.x + S.qr.size / 2, S.qr.y - 3.0, 'このQRを カメラで よみこんでね', 3.1, { anchor: 'middle', fill: '#41566e' });
+
+  /* ---------- 手順 ---------- */
+  const steps = [
+    'つかいかた',
+    '1. さかなを すきな色で ぬる',
+    '2. スマホのカメラで この紙を うつす',
+    '3. ぬった さかなが およぎだす！',
+    '※ 紙ぜんたいが 画面に入るように うつしてね'
+  ];
+  steps.forEach(function (s, i) {
+    text(18, 258 + i * 5.6, s, i === 0 ? 4.0 : 3.5, { weight: i === 0 ? 'bold' : 'normal', fill: i === 0 ? INK : '#41566e' });
+  });
+})();
+</script>
+</body>
+</html>

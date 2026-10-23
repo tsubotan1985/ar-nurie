@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#05121f">
+<title>ARぬりえ さかな</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: #05121f; overflow: hidden;
+    font-family: 'UD Digi Kyokasho N','UD Digi Kyokasho NK','Hiragino Sans','Noto Sans JP',sans-serif; }
+  #c { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; }
+  #pill { position: fixed; top: max(12px, env(safe-area-inset-top)); left: 50%; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 8px; padding: 7px 15px; border-radius: 999px;
+    background: rgba(6,18,32,.6); backdrop-filter: blur(8px); color: #eaf6ff;
+    font-size: 13px; letter-spacing: .04em; white-space: nowrap; opacity: 0; transition: opacity .3s; }
+  #pill.on { opacity: 1; }
+  #pill .dot { width: 8px; height: 8px; border-radius: 50%; background: #ffd166; animation: pulse 1.4s infinite; }
+  #pill.hit .dot { background: #6ee7a8; animation: none; }
+  @keyframes pulse { 0%,100% { opacity: .35 } 50% { opacity: 1 } }
+  #toast { position: fixed; left: 50%; bottom: 13%; transform: translate(-50%, 8px) scale(.96);
+    padding: 12px 22px; border-radius: 16px; background: rgba(255,255,255,.94); color: #0d2233;
+    font-size: 19px; font-weight: bold; letter-spacing: .06em; opacity: 0; pointer-events: none;
+    transition: opacity .45s, transform .45s; box-shadow: 0 10px 30px rgba(0,0,0,.35); }
+  #toast.on { opacity: 1; transform: translate(-50%, 0) scale(1); }
+  #start { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 8px; text-align: center; color: #eaf6ff; padding: 24px;
+    background: radial-gradient(120% 80% at 50% 20%, #123a5c 0%, #05121f 70%); transition: opacity .5s; }
+  #start h1 { margin: 0; font-size: 34px; letter-spacing: .12em; }
+  #start h1 small { display: block; font-size: 13px; letter-spacing: .3em; color: #8fc7ea; margin-top: 6px; font-weight: normal; }
+  #start p { margin: 4px 0 0; font-size: 14px; color: #b8d4e8; line-height: 1.75; }
+  #start button { margin-top: 16px; font: inherit; font-size: 17px; font-weight: bold; letter-spacing: .08em;
+    padding: 14px 34px; border-radius: 999px; border: 0; color: #05121f;
+    background: linear-gradient(180deg,#8fe3ff,#4fb8e8); box-shadow: 0 8px 24px rgba(79,184,232,.4); cursor: pointer; }
+  #start .note { font-size: 11.5px; color: #6f93ad; margin-top: 14px; max-width: 320px; }
+  #start.hide { opacity: 0; pointer-events: none; }
+  #dbg { position: fixed; left: 8px; bottom: 8px; font: 11px/1.5 ui-monospace, monospace;
+    color: #9fe8c4; background: rgba(0,0,0,.55); padding: 6px 8px; border-radius: 6px; white-space: pre; display: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="pill"><span class="dot"></span><span id="pillText">QRを さがしています</span></div>
+<div id="toast">さかなを みつけた！</div>
+<div id="start">
+  <h1>ARぬりえ<small>COLOR &amp; SWIM</small></h1>
+  <p>ぬりえの さかなに 命を。<br>QRを カメラで よみこむと、<br>ぬった 色の さかなが およぎだします。</p>
+  <button id="go">カメラを はじめる</button>
+  <p class="note">ブラウザのカメラ許可が必要です。HTTPS（または localhost）で開いてください。</p>
+</div>
+<div id="dbg"></div>
+
+<script src="jsQR.js"></script>
+<script src="art.js"></script>
+<script>
+(function () {
+  'use strict';
+  const S = Art.SHEET;
+  const qs = new URLSearchParams(location.search);
+  const TEST_SRC = qs.get('img');
+  const DEBUG = qs.get('debug') === '1';
+  const SWIM_S = 78;               // ARのさかなの大きさ（mm/unit）＝印刷と同じ
+  const TRACK_PAD = 2.0;           // 追跡時、QRの周囲どれだけ広く切るか
+  const SAMPLE_W = 720;            // 色採取に使う縮小サイズ
+  const SAMPLE_EVERY = 5;          // 何フレームごとに色を採取するか
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const video = document.createElement('video');
+  video.playsInline = true; video.muted = true; video.autoplay = true;
+  let source = video;              // カメラ or テスト用の静止画
+  const work = document.createElement('canvas');
+  const wctx = work.getContext('2d', { willReadFrequently: true });
+  const smp = document.createElement('canvas');
+  const sctx = smp.getContext('2d', { willReadFrequently: true });
+
+  const QR = S.qr;
+  const QRMM = [[QR.x, QR.y], [QR.x + QR.size, QR.y],
+                [QR.x + QR.size, QR.y + QR.size], [QR.x, QR.y + QR.size]];
+
+  const state = {
+    srcW: 0, srcH: 0, running: false, frame: 0,
+    corners: null,          // 平滑化したQR四隅（元解像度px）
+    box: null,              // 直近のQR外接矩形
+    mode: 'search',         // search | track
+    miss: 0,
+    H: null,                // mm → 表示canvas(px)
+    lastHit: -1e9, firstHit: -1e9,
+    col: null, fps: 0, msQr: 0, zoom: 1
+  };
+
+  /* ---------------- 射影 ---------------- */
+  function gauss(A, b) {
+    const n = b.length;
+    for (let i = 0; i < n; i++) {
+      let p = i;
+      for (let r = i + 1; r < n; r++) if (Math.abs(A[r][i]) > Math.abs(A[p][i])) p = r;
+      if (Math.abs(A[p][i]) < 1e-12) return null;
+      if (p !== i) { const t = A[i]; A[i] = A[p]; A[p] = t; const s2 = b[i]; b[i] = b[p]; b[p] = s2; }
+      for (let r = 0; r < n; r++) {
+        if (r === i) continue;
+        const f = A[r][i] / A[i][i];
+        if (!f) continue;
+        for (let c = i; c < n; c++) A[r][c] -= f * A[i][c];
+        b[r] -= f * b[i];
+      }
+    }
+    const out = [];
+    for (let i = 0; i < n; i++) out.push(b[i] / A[i][i]);
+    return out;
+  }
+  function solveH(src, dst) {
+    const A = [], b = [];
+    for (let i = 0; i < 4; i++) {
+      const x = src[i][0], y = src[i][1], u = dst[i][0], v = dst[i][1];
+      A.push([x, y, 1, 0, 0, 0, -u * x, -u * y]); b.push(u);
+      A.push([0, 0, 0, x, y, 1, -v * x, -v * y]); b.push(v);
+    }
+    const h = gauss(A, b);
+    return h ? [h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1] : null;
+  }
+  function proj(H, x, y) {
+    const X = H[0] * x + H[1] * y + H[2];
+    const Y = H[3] * x + H[4] * y + H[5];
+    const W = H[6] * x + H[7] * y + H[8];
+    return [X / W, Y / W];
+  }
+  function scaleH(H, k) {
+    return [H[0] * k, H[1] * k, H[2] * k, H[3] * k, H[4] * k, H[5] * k, H[6], H[7], H[8]];
+  }
+
+  /* ---------------- QR検出 ---------------- */
+  function decodeRegion(sx, sy, sw, sh, zoom) {
+    const k = zoom || 1;
+    const dw = Math.max(1, Math.round(sw * k)), dh = Math.max(1, Math.round(sh * k));
+    work.width = dw; work.height = dh;
+    wctx.drawImage(source, sx, sy, sw, sh, 0, 0, dw, dh);
+    let img;
+    try { img = wctx.getImageData(0, 0, dw, dh); } catch (e) { return null; }
+    const res = jsQR(img.data, dw, dh, { inversionAttempts: 'dontInvert' });
+    if (!res || !res.location) return null;
+    const L = res.location;
+    const c = [L.topLeftCorner, L.topRightCorner, L.bottomRightCorner, L.bottomLeftCorner];
+    return c.map(function (p) { return [sx + p.x / k, sy + p.y / k]; });
+  }
+
+  function detect(now) {
+    const t0 = performance.now();
+    let found = null;
+
+    if (state.mode === 'track' && state.box) {
+      const b = state.box;
+      const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+      const cw = b.w * TRACK_PAD, ch = b.h * TRACK_PAD;
+      let x0 = Math.round(cx - cw / 2), y0 = Math.round(cy - ch / 2);
+      x0 = Math.max(0, Math.min(state.srcW - 1, x0));
+      y0 = Math.max(0, Math.min(state.srcH - 1, y0));
+      const ww = Math.min(state.srcW - x0, Math.round(cw));
+      const hh = Math.min(state.srcH - y0, Math.round(ch));
+      // 小さいときは拡大してから読む（4倍まで）
+      const zoom = Math.max(1, Math.min(4, 260 / Math.max(ww, hh)));
+      state.zoom = zoom;
+      found = decodeRegion(x0, y0, ww, hh, zoom);
+      if (!found) {
+        state.miss++;
+        if (state.miss > 5) { state.mode = 'search'; state.miss = 0; }
+      }
+    }
+
+    if (!found) {
+      // 探索: 2フレームに1回、元解像度で全画面
+      if (state.frame % 2 === 0 || state.miss > 0) {
+        found = decodeRegion(0, 0, state.srcW, state.srcH, 1);
+      }
+      if (found) { state.mode = 'track'; state.miss = 0; }
+    }
+
+    state.msQr = performance.now() - t0;
+    if (!found) return;
+
+    if (!state.corners) {
+      state.corners = found.map(function (p) { return [p[0], p[1]]; });
+    } else {
+      for (let i = 0; i < 4; i++) {
+        state.corners[i][0] += (found[i][0] - state.corners[i][0]) * 0.5;
+        state.corners[i][1] += (found[i][1] - state.corners[i][1]) * 0.5;
+      }
+    }
+    const H = solveH(QRMM, state.corners);
+    if (!H) return;
+    state.H = H;
+    state.lastHit = now;
+    if (state.firstHit < 0) { state.firstHit = now; showToast(); }
+
+    let x1 = 1e9, y1 = 1e9, x2 = -1e9, y2 = -1e9;
+    for (let i = 0; i < 4; i++) {
+      x1 = Math.min(x1, state.corners[i][0]); x2 = Math.max(x2, state.corners[i][0]);
+      y1 = Math.min(y1, state.corners[i][1]); y2 = Math.max(y2, state.corners[i][1]);
+    }
+    state.box = { x: x1, y: y1, w: Math.max(8, x2 - x1), h: Math.max(8, y2 - y1) };
+  }
+
+  /* ---------------- 色の採取 ---------------- */
+  function sampleColors() {
+    if (!state.H) return null;
+    const k = Math.min(1, SAMPLE_W / state.srcW);
+    const nw = Math.round(state.srcW * k), nh = Math.round(state.srcH * k);
+    if (smp.width !== nw || smp.height !== nh) { smp.width = nw; smp.height = nh; }
+    sctx.drawImage(source, 0, 0, nw, nh);
+    let data;
+    try { data = sctx.getImageData(0, 0, nw, nh).data; } catch (e) { return null; }
+    const H = scaleH(state.H, k);
+    const poseF = Art.pose(S.print);
+    const out = {};
+    const R = 3.2;
+    for (const key in Art.ZONES) {
+      const acc = [0, 0, 0]; let cnt = 0;
+      const list = Art.ZONES[key];
+      for (let li = 0; li < list.length; li++) {
+        const mm = poseF(list[li]);
+        for (let dy = -2; dy <= 2; dy++) {
+          for (let dx = -2; dx <= 2; dx++) {
+            const p = proj(H, mm[0] + dx * R / 2, mm[1] + dy * R / 2);
+            const x = p[0] | 0, y = p[1] | 0;
+            if (x < 1 || y < 1 || x >= nw - 1 || y >= nh - 1) continue;
+            const i = (y * nw + x) * 4;
+            const r = data[i], g = data[i + 1], b = data[i + 2];
+            const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+            if (mx > 190 && (mx - mn) < 26) continue;   // 紙の白
+            if (mx < 62) continue;                      // 黒い輪郭線
+            acc[0] += r; acc[1] += g; acc[2] += b; cnt++;
+          }
+        }
+      }
+      if (cnt < 6) continue;
+      const avg = [acc[0] / cnt, acc[1] / cnt, acc[2] / cnt];
+      const ax = Math.max(avg[0], avg[1], avg[2]), an = Math.min(avg[0], avg[1], avg[2]);
+      const sat = ax > 0 ? (ax - an) / ax : 0;
+      // 白い紙＋鉛筆の輪郭（暗い無彩色）は「塗っていない」とみなす
+      if (sat < 0.30 && !(ax >= 150 && sat >= 0.14)) continue;
+      out[key] = enhance(avg);
+    }
+    return out;
+  }
+  function applyColors() {
+    const s2 = sampleColors();
+    if (!s2) return;
+    if (!state.col) state.col = {};
+    for (const kk in s2) {
+      const c = s2[kk];
+      if (!state.col[kk]) state.col[kk] = c.slice();
+      else for (let i = 0; i < 3; i++) state.col[kk][i] += (c[i] - state.col[kk][i]) * 0.25;
+    }
+  }
+  function enhance(c) {
+    const g0 = 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+    let o = c.map(function (v) { return Math.max(0, Math.min(255, g0 + (v - g0) * 1.2)); });
+    const l = 0.299 * o[0] + 0.587 * o[1] + 0.114 * o[2];
+    const target = Math.min(210, Math.max(80, l));
+    if (l > 1) o = o.map(function (v) { return Math.max(0, Math.min(255, v * (target / l))); });
+    return o;
+  }
+  function hex(h) { return [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)]; }
+  function css(c, a) {
+    if (!c) return 'rgba(0,0,0,0)';
+    return 'rgba(' + (c[0] | 0) + ',' + (c[1] | 0) + ',' + (c[2] | 0) + ',' + (a == null ? 1 : a) + ')';
+  }
+  function shade(c, k) { return c.map(function (v) { return Math.max(0, Math.min(255, v * (1 + k))); }); }
+  function partColor(role) {
+    const D = Art.DEFAULT_COLORS, col = state.col || {};
+    switch (role) {
+      case 'body': return css(col.body || hex(D.body));
+      case 'tail': return css(col.tail || hex(D.tail));
+      case 'fin': return css(col.fin || hex(D.fin));
+      case 'spot': return css(shade(col.fin || col.body || hex(D.fin), -0.25));
+      case 'eye': return '#ffffff';
+      case 'pupil': return '#132132';
+      default: return '#1b2a41';
+    }
+  }
+
+  /* ---------------- 描画 ---------------- */
+  function poly(ptsMm, H) {
+    const p = new Array(ptsMm.length);
+    for (let i = 0; i < ptsMm.length; i++) p[i] = proj(H, ptsMm[i][0], ptsMm[i][1]);
+    return p;
+  }
+  function pathOf(P) {
+    ctx.beginPath();
+    ctx.moveTo(P[0][0], P[0][1]);
+    for (let i = 1; i < P.length; i++) ctx.lineTo(P[i][0], P[i][1]);
+    ctx.closePath();
+  }
+
+  function render(now, vis) {
+    const H = state.H;
+    const W = canvas.width, Ht = canvas.height;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, W, Ht);
+    try { ctx.drawImage(source, 0, 0, W, Ht); } catch (e) {}
+    if (!H || vis <= 0.01) return;
+
+    const t = now / 1000;
+    const a0 = proj(H, 0, 0), a1 = proj(H, 10, 0);
+    const pxPerMm = Math.hypot(a1[0] - a0[0], a1[1] - a0[1]) / 10;
+    ctx.globalAlpha = vis;
+
+    /* 水の色 */
+    ctx.save();
+    pathOf(poly([[0, 0], [S.w, 0], [S.w, S.h], [0, S.h]], H));
+    ctx.clip();
+    const c0 = proj(H, S.w / 2, S.h * 0.42);
+    const g = ctx.createRadialGradient(c0[0], c0[1], 0, c0[0], c0[1], 250 * pxPerMm);
+    g.addColorStop(0, 'rgba(120,205,255,0.14)');
+    g.addColorStop(0.6, 'rgba(90,180,240,0.07)');
+    g.addColorStop(1, 'rgba(60,140,220,0.02)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, Ht);
+    ctx.restore();
+
+    /* 泳ぐ位置 */
+    const st = S.stage;
+    const b1 = t * 0.33, b2 = t * 0.47;
+    const cx = st.x + st.w / 2 + st.w * 0.30 * Math.sin(b1);
+    const cy = st.y + st.h / 2 + st.h * 0.26 * Math.sin(b2);
+    const vx = Math.cos(b1), vy = Math.cos(b2) * (st.h * 0.47) / (st.w * 0.33);
+    const head = Math.atan2(vy, vx);
+    const flip = Math.cos(head) < 0 ? -1 : 1;
+    const rot = flip < 0 ? head - Math.PI : head;
+
+    const sinceHit = (now - state.firstHit) / 1000;
+    const pop = sinceHit < 0.6 ? 0.6 + 0.4 * (1 - Math.pow(1 - sinceHit / 0.6, 3)) : 1;
+    const base = { cx: cx, cy: cy, s: SWIM_S * pop, rot: rot, flip: flip };
+    const opt = { wiggle: true, t: t };
+
+    /* 影 */
+    if (ctx.filter !== undefined) ctx.filter = 'blur(' + Math.max(1, 2.4 * pxPerMm).toFixed(1) + 'px)';
+    const bodyGeo = Art.geo.find(function (q) { return q.def.id === 'body'; });
+    ctx.fillStyle = 'rgba(8,38,70,0.20)';
+    pathOf(poly(Art.partPoints(bodyGeo, { cx: cx + 5.5, cy: cy + 8, s: SWIM_S * pop, rot: rot, flip: flip }, opt), H));
+    ctx.fill();
+    if (ctx.filter !== undefined) ctx.filter = 'none';
+
+    /* 泡 */
+    const mouthMM = Art.pose(base)([0.5, 0.02]);
+    const back = head + Math.PI;
+    for (let i = 0; i < 9; i++) {
+      const life = ((t * 0.5 + i / 9) % 1);
+      const bx = mouthMM[0] + Math.cos(back) * life * 26 + Math.sin(life * 7 + i) * 2.4;
+      const by = mouthMM[1] + Math.sin(back) * life * 26 - life * 16;
+      const p = proj(H, bx, by);
+      ctx.beginPath();
+      ctx.arc(p[0], p[1], (0.9 + life * 2.2) * pxPerMm, 0, 6.2832);
+      ctx.fillStyle = 'rgba(255,255,255,' + (0.32 * (1 - life)).toFixed(3) + ')';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,' + (0.5 * (1 - life)).toFixed(3) + ')';
+      ctx.lineWidth = Math.max(0.4, 0.35 * pxPerMm);
+      ctx.stroke();
+    }
+
+    /* さかな */
+    const sorted = Art.geo.slice().sort(function (a, b) { return a.def.z - b.def.z; });
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    for (let i = 0; i < sorted.length; i++) {
+      const gg = sorted[i];
+      pathOf(poly(Art.partPoints(gg, base, opt), H));
+      ctx.fillStyle = partColor(gg.def.role);
+      ctx.fill();
+      const lw = (gg.def.role === 'body' || gg.def.role === 'tail' ? 0.9 : 0.62) * pxPerMm;
+      ctx.strokeStyle = 'rgba(20,34,52,0.92)';
+      ctx.lineWidth = Math.max(0.6, lw);
+      ctx.stroke();
+    }
+    ctx.strokeStyle = 'rgba(20,34,52,0.92)';
+    for (let i = 0; i < Art.LINES.length; i++) {
+      const l = Art.LINES[i];
+      const g3 = { def: l, pts: Art.chaikin(l.ctrl, 2, false) };
+      const P = poly(Art.partPoints(g3, base, opt), H);
+      ctx.beginPath();
+      ctx.moveTo(P[0][0], P[0][1]);
+      for (let k2 = 1; k2 < P.length; k2++) ctx.lineTo(P[k2][0], P[k2][1]);
+      ctx.lineWidth = Math.max(0.5, 0.55 * pxPerMm);
+      ctx.stroke();
+    }
+
+    /* 出現の波紋 */
+    const fr = (now - state.firstHit) / 1000 / 1.1;
+    if (fr >= 0 && fr < 1) {
+      const c = proj(H, cx, cy);
+      ctx.beginPath();
+      ctx.arc(c[0], c[1], (8 + 62 * fr) * pxPerMm, 0, 6.2832);
+      ctx.strokeStyle = 'rgba(255,255,255,' + (0.55 * (1 - fr)).toFixed(3) + ')';
+      ctx.lineWidth = Math.max(0.8, 1.4 * pxPerMm);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /* ---------------- UI ---------------- */
+  const pill = document.getElementById('pill');
+  const pillText = document.getElementById('pillText');
+  const toast = document.getElementById('toast');
+  let toastTimer = 0;
+  function showToast() {
+    toast.classList.add('on');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toast.classList.remove('on'); }, 1900);
+  }
+  const dbg = document.getElementById('dbg');
+  if (DEBUG) dbg.style.display = 'block';
+
+  /* ---------------- ループ ---------------- */
+  let lastT = performance.now(), fpsAcc = 0, fpsN = 0;
+  function loop(now) {
+    requestAnimationFrame(loop);
+    if (!state.running) return;
+    state.frame++;
+    const dt = now - lastT; lastT = now;
+    if (dt > 0 && dt < 500) { fpsAcc += 1000 / dt; fpsN++; if (fpsN >= 15) { state.fps = fpsAcc / fpsN; fpsAcc = 0; fpsN = 0; } }
+
+    detect(now);
+    if (state.frame % SAMPLE_EVERY === 0 && now - state.lastHit < 400) applyColors();
+
+    const lost = now - state.lastHit;
+    const vis = lost < 220 ? 1 : Math.max(0, 1 - (lost - 220) / 700);
+    if (lost > 2500) { state.corners = null; state.H = null; state.box = null; state.mode = 'search'; }
+    render(now, vis);
+
+    const hit = lost < 400;
+    pill.classList.toggle('hit', hit);
+    pillText.textContent = hit ? 'ぬりえを みつけた'
+      : (lost > 4000 && state.firstHit < 0 ? 'QRを 画面のまんなかに うつしてね' : 'QRを さがしています');
+    if (DEBUG) {
+      dbg.textContent =
+        'fps ' + state.fps.toFixed(0) + '  qr ' + state.msQr.toFixed(1) + 'ms  ' + state.mode + ' zoom' + state.zoom.toFixed(1) + '\n' +
+        'src ' + state.srcW + 'x' + state.srcH + '  vis ' + vis.toFixed(2) + '\n' +
+        (state.corners ? state.corners.map(function (c) { return c[0].toFixed(0) + ',' + c[1].toFixed(0); }).join(' / ') : 'no marker');
+    }
+  }
+
+  /* ---------------- 起動 ---------------- */
+  function startLoop() {
+    if (state.running) return;
+    state.running = true;
+    canvas.width = state.srcW; canvas.height = state.srcH;
+    pill.classList.add('on');
+    requestAnimationFrame(loop);
+  }
+
+  if (TEST_SRC) {
+    document.getElementById('start').classList.add('hide');
+    if (/\.(mp4|webm|mov|m4v)(\?|$)/i.test(TEST_SRC)) {
+      video.src = TEST_SRC; video.loop = true;
+      video.addEventListener('loadeddata', function () {
+        state.srcW = video.videoWidth; state.srcH = video.videoHeight; startLoop();
+      });
+      video.play().catch(function () {});
+    } else {
+      const im = new Image();
+      im.onload = function () {
+        const off = document.createElement('canvas');
+        off.width = im.naturalWidth; off.height = im.naturalHeight;
+        off.getContext('2d').drawImage(im, 0, 0);
+        source = off;
+        state.srcW = off.width; state.srcH = off.height;
+        startLoop();
+      };
+      im.src = TEST_SRC;
+    }
+  } else {
+    document.getElementById('go').addEventListener('click', function () {
+      this.disabled = true;
+      navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false
+      }).then(function (stream) {
+        video.srcObject = stream;
+        video.addEventListener('loadedmetadata', function () {
+          state.srcW = video.videoWidth; state.srcH = video.videoHeight;
+          document.getElementById('start').classList.add('hide');
+          startLoop();
+        }, { once: true });
+        return video.play();
+      }).catch(function (err) {
+        document.getElementById('go').disabled = false;
+        document.querySelector('#start .note').textContent =
+          'カメラを使えませんでした（' + ((err && err.name) || 'error') + '）。HTTPS か localhost で開く必要があります。';
+      });
+    });
+  }
+
+  window.__art = { state: state, Art: Art, sample: applyColors, sampleRaw: sampleColors };
+})();
+</script>
+</body>
+</html>
