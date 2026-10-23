@@ -9,7 +9,7 @@
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body { margin: 0; height: 100%; background: #05121f; overflow: hidden;
     font-family: 'UD Digi Kyokasho N','UD Digi Kyokasho NK','Hiragino Sans','Noto Sans JP',sans-serif; }
-  #c { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; }
+  #c { position: fixed; inset: 0; width: 100%; height: 100%; display: block; background: #000; }
   #pill { position: fixed; top: max(12px, env(safe-area-inset-top)); left: 50%; transform: translateX(-50%);
     display: flex; align-items: center; gap: 8px; padding: 7px 15px; border-radius: 999px;
     background: rgba(6,18,32,.6); backdrop-filter: blur(8px); color: #eaf6ff;
@@ -66,7 +66,7 @@
   const DEBUG = qs.get('debug') === '1';
   const SWIM_S = 78;               // ARのさかなの大きさ（mm/unit）＝印刷と同じ
   const TRACK_PAD = 2.0;           // 追跡時、QRの周囲どれだけ広く切るか
-  const SAMPLE_W = 720;            // 色採取に使う縮小サイズ
+  const SAMPLE_W = 1600;           // 色採取に使うサイズ（原解像度まで。小さい点も拾うため）
   const SAMPLE_EVERY = 5;          // 何フレームごとに色を採取するか
 
   const canvas = document.getElementById('c');
@@ -85,6 +85,7 @@
 
   const state = {
     srcW: 0, srcH: 0, running: false, frame: 0,
+    art: Art.ARTS[Art.DEFAULT_ART], lastData: '',
     corners: null,          // 平滑化したQR四隅（元解像度px）
     box: null,              // 直近のQR外接矩形
     mode: 'search',         // search | track
@@ -144,9 +145,19 @@
     try { img = wctx.getImageData(0, 0, dw, dh); } catch (e) { return null; }
     const res = jsQR(img.data, dw, dh, { inversionAttempts: 'dontInvert' });
     if (!res || !res.location) return null;
+    state.lastData = res.data;
+    const c = symbolCorners(res);
+    if (!c) return null;
+    return c.map(function (p) { return [sx + p[0] / k, sy + p[1] / k]; });
+  }
+
+  // QRシンボルの四隅（画像座標）。jsQR の *Corner はシンボル外形に一致する（実測で確認）。
+  // ※ ファインダ中心から作り直すと遠近成分が落ちて、紙の端で数pxずれる。触らないこと。
+  function symbolCorners(res) {
     const L = res.location;
-    const c = [L.topLeftCorner, L.topRightCorner, L.bottomRightCorner, L.bottomLeftCorner];
-    return c.map(function (p) { return [sx + p.x / k, sy + p.y / k]; });
+    if (!L) return null;
+    return [L.topLeftCorner, L.topRightCorner, L.bottomRightCorner, L.bottomLeftCorner]
+      .map(function (p) { return [p.x, p.y]; });
   }
 
   function detect(now) {
@@ -183,12 +194,24 @@
     state.msQr = performance.now() - t0;
     if (!found) return;
 
+    // QRの中身で作品を切り替え（ARNURI-01=さかな / ARNURI-02=くるま）
+    const id = (state.lastData || '').trim();
+    if (id && Art.ARTS[id] && state.art !== Art.ARTS[id]) {
+      state.art = Art.ARTS[id];
+      state.col = null;
+      state.firstHit = -1e9;      // 出現演出をやり直す
+    }
+
     if (!state.corners) {
       state.corners = found.map(function (p) { return [p[0], p[1]]; });
     } else {
+      // 静止時はなめらかに、大きく動いたときは即座に追従（ガタつき対策）
+      const c0 = state.corners;
+      const sz = Math.hypot(c0[1][0] - c0[0][0], c0[1][1] - c0[0][1]) || 50;
       for (let i = 0; i < 4; i++) {
-        state.corners[i][0] += (found[i][0] - state.corners[i][0]) * 0.5;
-        state.corners[i][1] += (found[i][1] - state.corners[i][1]) * 0.5;
+        const dx = found[i][0] - c0[i][0], dy = found[i][1] - c0[i][1];
+        const k = Math.hypot(dx, dy) > sz * 0.45 ? 1 : 0.20;
+        c0[i][0] += dx * k; c0[i][1] += dy * k;
       }
     }
     const H = solveH(QRMM, state.corners);
@@ -215,12 +238,14 @@
     let data;
     try { data = sctx.getImageData(0, 0, nw, nh).data; } catch (e) { return null; }
     const H = scaleH(state.H, k);
-    const poseF = Art.pose(S.print);
+    const A = state.art;
+    const poseF = Art.pose(A.print, A.ctr);
     const out = {};
-    const R = 3.2;
-    for (const key in Art.ZONES) {
+    for (const key in A.zones) {
+      // まだ（小さい円）は狭く、体やひれは広く採る
+      const R = key.indexOf('spot') === 0 ? 1.6 : 3.2;
       const acc = [0, 0, 0]; let cnt = 0;
-      const list = Art.ZONES[key];
+      const list = A.zones[key];
       for (let li = 0; li < list.length; li++) {
         const mm = poseF(list[li]);
         for (let dy = -2; dy <= 2; dy++) {
@@ -271,23 +296,34 @@
     return 'rgba(' + (c[0] | 0) + ',' + (c[1] | 0) + ',' + (c[2] | 0) + ',' + (a == null ? 1 : a) + ')';
   }
   function shade(c, k) { return c.map(function (v) { return Math.max(0, Math.min(255, v * (1 + k))); }); }
-  function partColor(role) {
-    const D = Art.DEFAULT_COLORS, col = state.col || {};
+  // 部品ごとの塗り色。紙の同じ位置から採った色を優先し、無ければ予備の色。
+  function partColor(def) {
+    const A = state.art, D = A.colors, col = state.col || {}, role = def.role, id = def.id;
+    if (role === 'eye') return '#ffffff';
+    if (role === 'pupil') return '#132132';
+    const zk = A.partZone[id];
+    let c = zk ? col[zk] : null;                       // その部品の場所の色
+    if (!c && A.fallback[id]) c = col[A.fallback[id]];
+    if (!c && role === 'spot') c = col.fin || col.body;
+    if (c) return css(c);
     switch (role) {
-      case 'body': return css(col.body || hex(D.body));
-      case 'tail': return css(col.tail || hex(D.tail));
-      case 'fin': return css(col.fin || hex(D.fin));
-      case 'spot': return css(shade(col.fin || col.body || hex(D.fin), -0.25));
-      case 'eye': return '#ffffff';
-      case 'pupil': return '#132132';
+      case 'body': return css(hex(D.body));
+      case 'tail': return css(hex(D.tail));
+      case 'fin': return css(hex(D.fin));
+      case 'glass': return css(hex(D.glass));
+      case 'wheel': return css(hex(D.wheel));
+      case 'hub': return css(hex(D.hub));
+      case 'dot': return css(hex(D.dot));
+      case 'light': return css(hex(D.light));
+      case 'spot': return css(shade(hex(D.fin), -0.25));
       default: return '#1b2a41';
     }
   }
 
   /* ---------------- 描画 ---------------- */
-  function poly(ptsMm, H) {
+  function poly(ptsMm, pv) {
     const p = new Array(ptsMm.length);
-    for (let i = 0; i < ptsMm.length; i++) p[i] = proj(H, ptsMm[i][0], ptsMm[i][1]);
+    for (let i = 0; i < ptsMm.length; i++) p[i] = pv(ptsMm[i][0], ptsMm[i][1]);
     return p;
   }
   function pathOf(P) {
@@ -301,20 +337,30 @@
     const H = state.H;
     const W = canvas.width, Ht = canvas.height;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, W, Ht);
-    try { ctx.drawImage(source, 0, 0, W, Ht); } catch (e) {}
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, W, Ht);
+    // カメラ映像は縦横比を保って画面に収める（canvas は object-fit が効かないため自前で）
+    const k = Math.min(W / state.srcW, Ht / state.srcH);
+    const ox = (W - state.srcW * k) / 2, oy = (Ht - state.srcH * k) / 2;
+    state.view = { k: k, ox: ox, oy: oy };
+    try { ctx.drawImage(source, ox, oy, state.srcW * k, state.srcH * k); } catch (e) {}
     if (!H || vis <= 0.01) return;
 
     const t = now / 1000;
-    const a0 = proj(H, 0, 0), a1 = proj(H, 10, 0);
+    // mm → 画面px（映像の相似変換をかぶせる）
+    const pv = function (x, y) { const p = proj(H, x, y); return [p[0] * k + ox, p[1] * k + oy]; };
+    const a0 = pv(0, 0), a1 = pv(10, 0);
     const pxPerMm = Math.hypot(a1[0] - a0[0], a1[1] - a0[1]) / 10;
     ctx.globalAlpha = vis;
 
-    /* 水の色 */
+    const A = state.art;
+
+    /* 水の色（さかなの用紙だけ） */
+    if (A.bubbles) {
     ctx.save();
-    pathOf(poly([[0, 0], [S.w, 0], [S.w, S.h], [0, S.h]], H));
+    pathOf(poly([[0, 0], [S.w, 0], [S.w, S.h], [0, S.h]], pv));
     ctx.clip();
-    const c0 = proj(H, S.w / 2, S.h * 0.42);
+    const c0 = pv(S.w / 2, S.h * 0.42);
     const g = ctx.createRadialGradient(c0[0], c0[1], 0, c0[0], c0[1], 250 * pxPerMm);
     g.addColorStop(0, 'rgba(120,205,255,0.14)');
     g.addColorStop(0.6, 'rgba(90,180,240,0.07)');
@@ -322,38 +368,37 @@
     ctx.fillStyle = g;
     ctx.fillRect(0, 0, W, Ht);
     ctx.restore();
+    }
 
-    /* 泳ぐ位置 */
-    const st = S.stage;
-    const b1 = t * 0.33, b2 = t * 0.47;
-    const cx = st.x + st.w / 2 + st.w * 0.30 * Math.sin(b1);
-    const cy = st.y + st.h / 2 + st.h * 0.26 * Math.sin(b2);
-    const vx = Math.cos(b1), vy = Math.cos(b2) * (st.h * 0.47) / (st.w * 0.33);
-    const head = Math.atan2(vy, vx);
+    /* 動く位置（作品ごとの動き） */
+    const mo = A.center(t, A.stage);
+    const head = Math.atan2(mo.diry, mo.dirx);
     const flip = Math.cos(head) < 0 ? -1 : 1;
     const rot = flip < 0 ? head - Math.PI : head;
 
     const sinceHit = (now - state.firstHit) / 1000;
     const pop = sinceHit < 0.6 ? 0.6 + 0.4 * (1 - Math.pow(1 - sinceHit / 0.6, 3)) : 1;
-    const base = { cx: cx, cy: cy, s: SWIM_S * pop, rot: rot, flip: flip };
-    const opt = { wiggle: true, t: t };
+    const scale = A.arScale * pop;
+    const base = { cx: mo.cx, cy: mo.cy, s: scale, rot: rot, flip: flip };
+    const opt = { wiggle: true, t: t, art: A, dir: flip };
 
     /* 影 */
     if (ctx.filter !== undefined) ctx.filter = 'blur(' + Math.max(1, 2.4 * pxPerMm).toFixed(1) + 'px)';
-    const bodyGeo = Art.geo.find(function (q) { return q.def.id === 'body'; });
+    const bodyGeo = A.geo.find(function (q) { return q.def.id === 'body'; });
     ctx.fillStyle = 'rgba(8,38,70,0.20)';
-    pathOf(poly(Art.partPoints(bodyGeo, { cx: cx + 5.5, cy: cy + 8, s: SWIM_S * pop, rot: rot, flip: flip }, opt), H));
+    pathOf(poly(Art.partPoints(bodyGeo, { cx: mo.cx + 5.5, cy: mo.cy + 8, s: scale, rot: rot, flip: flip }, opt), pv));
     ctx.fill();
     if (ctx.filter !== undefined) ctx.filter = 'none';
 
-    /* 泡 */
-    const mouthMM = Art.pose(base)([0.5, 0.02]);
+    /* 泡（さかなだけ） */
+    if (A.bubbles) {
+    const mouthMM = Art.pose(base, A.ctr)([0.5, 0.02]);
     const back = head + Math.PI;
     for (let i = 0; i < 9; i++) {
       const life = ((t * 0.5 + i / 9) % 1);
       const bx = mouthMM[0] + Math.cos(back) * life * 26 + Math.sin(life * 7 + i) * 2.4;
       const by = mouthMM[1] + Math.sin(back) * life * 26 - life * 16;
-      const p = proj(H, bx, by);
+      const p = pv(bx, by);
       ctx.beginPath();
       ctx.arc(p[0], p[1], (0.9 + life * 2.2) * pxPerMm, 0, 6.2832);
       ctx.fillStyle = 'rgba(255,255,255,' + (0.32 * (1 - life)).toFixed(3) + ')';
@@ -362,15 +407,16 @@
       ctx.lineWidth = Math.max(0.4, 0.35 * pxPerMm);
       ctx.stroke();
     }
+    }
 
-    /* さかな */
-    const sorted = Art.geo.slice().sort(function (a, b) { return a.def.z - b.def.z; });
+    /* 本体 */
+    const sorted = A.geo.slice().sort(function (a, b) { return a.def.z - b.def.z; });
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
     for (let i = 0; i < sorted.length; i++) {
       const gg = sorted[i];
-      pathOf(poly(Art.partPoints(gg, base, opt), H));
-      ctx.fillStyle = partColor(gg.def.role);
+      pathOf(poly(Art.partPoints(gg, base, opt), pv));
+      ctx.fillStyle = partColor(gg.def);
       ctx.fill();
       const lw = (gg.def.role === 'body' || gg.def.role === 'tail' ? 0.9 : 0.62) * pxPerMm;
       ctx.strokeStyle = 'rgba(20,34,52,0.92)';
@@ -378,10 +424,8 @@
       ctx.stroke();
     }
     ctx.strokeStyle = 'rgba(20,34,52,0.92)';
-    for (let i = 0; i < Art.LINES.length; i++) {
-      const l = Art.LINES[i];
-      const g3 = { def: l, pts: Art.chaikin(l.ctrl, 2, false) };
-      const P = poly(Art.partPoints(g3, base, opt), H);
+    for (let i = 0; i < A.lineGeo.length; i++) {
+      const P = poly(Art.partPoints(A.lineGeo[i], base, opt), pv);
       ctx.beginPath();
       ctx.moveTo(P[0][0], P[0][1]);
       for (let k2 = 1; k2 < P.length; k2++) ctx.lineTo(P[k2][0], P[k2][1]);
@@ -392,7 +436,7 @@
     /* 出現の波紋 */
     const fr = (now - state.firstHit) / 1000 / 1.1;
     if (fr >= 0 && fr < 1) {
-      const c = proj(H, cx, cy);
+      const c = pv(mo.cx, mo.cy);
       ctx.beginPath();
       ctx.arc(c[0], c[1], (8 + 62 * fr) * pxPerMm, 0, 6.2832);
       ctx.strokeStyle = 'rgba(255,255,255,' + (0.55 * (1 - fr)).toFixed(3) + ')';
@@ -445,10 +489,19 @@
   }
 
   /* ---------------- 起動 ---------------- */
+  function fitCanvas() {
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const w = Math.max(1, Math.round(canvas.clientWidth * dpr));
+    const h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+  }
+  window.addEventListener('resize', function () { if (state.running) fitCanvas(); });
+  window.addEventListener('orientationchange', function () { setTimeout(function () { if (state.running) fitCanvas(); }, 300); });
+
   function startLoop() {
     if (state.running) return;
     state.running = true;
-    canvas.width = state.srcW; canvas.height = state.srcH;
+    fitCanvas();
     pill.classList.add('on');
     requestAnimationFrame(loop);
   }
@@ -477,7 +530,7 @@
     document.getElementById('go').addEventListener('click', function () {
       this.disabled = true;
       navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
         audio: false
       }).then(function (stream) {
         video.srcObject = stream;
