@@ -17,12 +17,22 @@ QuiverVision 系の「ぬりえAR」を、外部ライブラリ最小・サー�
 | `web/print.html` | 印刷用のぬりえ（A4）。QRもここで生成 |
 | `web/jsQR.js` | QRデコーダ（vendored, MIT） |
 | `web/qrcodegen.js` | QR生成（vendored, MIT） |
-| `ARぬりえ_さかな_A4.pdf` | 印刷用PDF（A4実寸） |
+| `ARぬりえ_さかな_A4.pdf` | 印刷用PDF（A4実寸）・さかな |
+| `ARぬりえ_くるま_A4.pdf` | 印刷用PDF（A4実寸）・くるま |
 | `tools/make_test_photo.py` | 検証用の「カメラ写真」合成（塗り→斜め撮影風） |
+
+## 用紙は2種類（QRの中身で自動判別）
+
+| QR | 用紙 | 印刷URL |
+|---|---|---|
+| `ARNURI-01` | さかな | `print.html?art=ARNURI-01` |
+| `ARNURI-02` | くるま | `print.html?art=ARNURI-02` |
+
+アプリのURLは1つ。印刷した紙のQRを読むだけで、さかな／くるまが切り替わる。
 
 ## 使い方
 
-1. `ARぬりえ_さかな_A4.pdf` をA4・実寸100%で印刷
+1. 印刷したい用紙のPDFをA4・実寸100%で印刷
 2. スマホで公開URLを開く（**HTTPS必須**。カメラはセキュアコンテキストでしか使えない）
 3. 「カメラをはじめる」→ 紙全体が画面に入るように映す
 4. 魚が泳ぎだす。紙を傾けても魚は紙に貼り付いたまま
