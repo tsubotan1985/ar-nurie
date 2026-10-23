@@ -94,15 +94,20 @@
     });
   } else {
     // くるま: 道路と雲
-    el('path', { d: 'M12 176 L198 176' }, deco);
-    el('path', { d: 'M12 182 L198 182' }, deco);
-    for (let x = 20; x < 198; x += 26) el('path', { d: 'M' + x + ' 179 L' + (x + 12) + ' 179' }, deco);
-    [[44, 56, 9], [54, 52, 6], [34, 54, 6], [150, 48, 8], [159, 45, 5.4], [141, 46, 5]].forEach(function (c) {
-      el('circle', { cx: c[0], cy: c[1], r: c[2] }, deco);
-    });
-    [[40, 68, 4.6, 0.6], [48, 70, 3.6, 0.5], [150, 68, 5, 0.6], [160, 70, 3.8, 0.5]].forEach(function (q) {
-      el('ellipse', { cx: q[0], cy: q[1], rx: q[2], ry: q[3] }, deco);
-    });
+    el('path', { d: 'M12 178 L198 178' }, deco);
+    el('path', { d: 'M12 184 L198 184' }, deco);
+    for (let x = 18; x < 198; x += 24) el('path', { d: 'M' + x + ' 181 L' + (x + 11) + ' 181' }, deco);
+    // 太陽（雲は崩れやすいので、はっきり描ける太陽にする）
+    (function () {
+      const cx = 36, cy = 62, r = 8.5;
+      el('circle', { cx: cx, cy: cy, r: r }, deco);
+      for (let i = 0; i < 8; i++) {
+        const a = (i / 8) * Math.PI * 2;
+        const x1 = cx + Math.cos(a) * (r + 3.2), y1 = cy + Math.sin(a) * (r + 3.2);
+        const x2 = cx + Math.cos(a) * (r + 6.4), y2 = cy + Math.sin(a) * (r + 6.4);
+        el('path', { d: 'M' + x1.toFixed(2) + ' ' + y1.toFixed(2) + 'L' + x2.toFixed(2) + ' ' + y2.toFixed(2) }, deco);
+      }
+    })();
   }
 
   /* ---------- 絵 ---------- */

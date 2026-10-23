@@ -300,7 +300,8 @@
   function partColor(def) {
     const A = state.art, D = A.colors, col = state.col || {}, role = def.role, id = def.id;
     if (role === 'eye') return '#ffffff';
-    if (role === 'pupil') return '#132132';
+    if (role === 'pupil') return D.pupil || '#132132';
+    if (D[role]) return css(hex(D[role]));      // 作品ごとの色名（scale, rim, bolt, mirror 等）
     const zk = A.partZone[id];
     let c = zk ? col[zk] : null;                       // その部品の場所の色
     if (!c && A.fallback[id]) c = col[A.fallback[id]];
